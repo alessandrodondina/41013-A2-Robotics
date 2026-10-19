@@ -69,13 +69,14 @@ def build_ward(env):
         (0.95, 0.12, 0.12, 1),
     ]
 
+    containers = []
     for i, colour in enumerate(colours):
         x = 1.30 + i * 0.14
-        cylinder(
+        containers.append(cylinder(
             env, f"Dummy container {i+1}",
             (x, -0.72, 0.925),
             colour
-        )
+        ))
 
     # Kawasaki mounting area - empty for now
     box(env, "Kawasaki mounting plate",
@@ -168,6 +169,7 @@ def build_ward(env):
             (0.48, 0.50, 0.54, 1))
 
     print("MediAssist ward environment ready.")
+    return containers
 
 
 def main():
