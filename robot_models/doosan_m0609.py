@@ -1,3 +1,4 @@
+
 """
 Doosan M0609 - custom 6-DOF kinematic model.
 
@@ -5,8 +6,7 @@ Joint origins, orientations and limits are based on the
 official Doosan M0609 URDF.
 
 The robot is constructed using Robotics Toolbox ETS.
-Visual geometry is generated separately using simple
-shapes, rather than importing a prebuilt robot model.
+Official CAD meshes are handled separately by the Swift visualisation.
 """
 
 import numpy as np
@@ -25,7 +25,7 @@ JOINT_XYZ = [
     (0.0, -0.121, 0.0),
 ]
 
-# Joint orientations: RPY in radians
+# Joint orientations: URDF roll, pitch, yaw in radians
 JOINT_RPY = [
     (0.0, 0.0, 0.0),
     (0.0, -1.571, -1.571),
@@ -35,6 +35,7 @@ JOINT_RPY = [
     (1.571, 0.0, 0.0),
 ]
 
+# Joint limits: minimum and maximum in radians
 JOINT_LIMITS = np.array([
     [-6.2832, 6.2832],
     [-6.2832, 6.2832],
@@ -46,18 +47,21 @@ JOINT_LIMITS = np.array([
 
 
 def create_doosan():
-    """Create a six-revolute-joint Doosan M0609 ETS model."""
+    """Create the custom six-joint Doosan M0609 ETS model."""
 
     chain = rtb.ETS()
 
     for i, (xyz, rpy) in enumerate(zip(JOINT_XYZ, JOINT_RPY)):
-        # Fixed transform from the previous joint
-        R = rpy2r(rpy, order="xyz")
-        T = SE3.Rt(R, xyz)
 
+        # URDF rotation convention:
+        # R = Rz(yaw) @ Ry(pitch) @ Rx(roll)
+        R = rpy2r(rpy, order="zyx")
+
+        # Fixed transform from the preceding link
+        T = SE3.Rt(R, xyz)
         chain *= rtb.ETS([rtb.ET.SE3(T.A)])
 
-        # Each revolute joint rotates about its local Z axis
+        # Each revolute joint rotates about its local Z-axis
         chain *= rtb.ETS([rtb.ET.Rz(jindex=i)])
 
     robot = rtb.ERobot(chain, name="Doosan M0609")
