@@ -1,6 +1,21 @@
 """
 kawasaki_pick_place.py
 ======================
+Robot 1 task: the Kawasaki RS007N picks a medication container off the
+storage shelf and places it on the transfer plate.
+
+Motion choices (and why):
+    Big moves between areas  -> joint space trajectory (jtraj).
+        Smooth, fast, and every joint stays inside its limits. The exact
+        path of the tool doesn't matter while it's high in free space.
+    Going down to / up from a container -> RMRC straight line.
+        Near the shelf the tool must go STRAIGHT down and up so the
+        fingers don't clip the neighbouring containers. jtraj can't
+        promise a straight line, RMRC can.
+
+Run (from the repo root):
+    python tasks/kawasaki_pick_place.py            picks red container
+    python tasks/kawasaki_pick_place.py green 1    picks the 2nd green one
 """
 
 import os
@@ -132,11 +147,27 @@ class KawasakiCell:
     # ------------------------------------------------------------------
     # The task
     # ------------------------------------------------------------------
-    def pick_and_place(self, obj, pick_point, place_point):
+    def pause(self, seconds):
+        """Hold still for a moment (keeps Swift updating)."""
+        for _ in range(int(seconds / DT)):
+            self.show(self.bot.q)
+
+    def pick_and_place(self, obj, pick_point, place_point,
+                       camera=None, sensor=None):
+        """camera / sensor are optional placeholders (environment/sensors.py)
+        that only change what is shown, not how the robot moves."""
         container_gap = 2 * layout.CONTAINER_RADIUS
+        if sensor is not None:
+            sensor.set_detected(False)
 
         print("  -> home")
         self.move_joint(self.bot.qhome)
+
+        if camera is not None:
+            print("  -> RGB-D camera identifying container")
+            camera.identify(pick_point)
+            self.pause(1.5)
+            camera.clear()
 
         print("  -> above container")
         self.move_to(self.flange_for(pick_point, APPROACH_HEIGHT))
@@ -157,6 +188,9 @@ class KawasakiCell:
         print("  -> lower onto plate (RMRC)")
         self.move_line(self.flange_for(place_point))
         self.release()
+        if sensor is not None:
+            print("  -> photoelectric sensor: container detected")
+            sensor.set_detected(True)
         self.gripper_to(self.gripper.MAX_OPENING)
 
         print("  -> retreat (RMRC) and home")
@@ -168,6 +202,7 @@ class KawasakiCell:
 def main():
     import swift
     from environment.ward import build_ward
+    from environment.sensors import RGBDCamera, PhotoelectricSensor
 
     colour = sys.argv[1] if len(sys.argv) > 1 else "red"
     index = int(sys.argv[2]) if len(sys.argv) > 2 else 0
@@ -175,6 +210,8 @@ def main():
     env = swift.Swift()
     env.launch(realtime=True)
     containers = build_ward(env)
+    camera = RGBDCamera(env)
+    sensor = PhotoelectricSensor(env)
 
     # Match the requested colour/index to the actual cylinder object.
     # build_ward adds the containers in layout.SHELF_ORDER order.
@@ -185,7 +222,9 @@ def main():
 
     cell = KawasakiCell(env)
     print(f"Picking {colour} container {index}")
-    cell.pick_and_place(obj, pick_point, layout.TRANSFER_POINT)
+    cell.pause(1.0)     # let Swift finish loading before moving
+    cell.pick_and_place(obj, pick_point, layout.TRANSFER_POINT,
+                        camera=camera, sensor=sensor)
 
     try:
         while True:
