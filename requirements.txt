@@ -1,0 +1,16 @@
+# MediAssist Robots - Python dependencies
+# Create a local venv (not committed, see .gitignore):
+#   python -m venv .venv
+#   .venv\Scripts\activate          (Windows)
+#   source .venv/bin/activate       (macOS/Linux)
+#   pip install -r requirements.txt
+#
+# ir_support is the 41013 subject package. If pip can't find it,
+# install it the same way you did for Lab Assignment 1.
+
+ir-support
+roboticstoolbox-python
+swift-sim
+spatialmath-python
+spatialgeometry
+numpy
