@@ -1,24 +1,6 @@
 """
 kawasaki_rs007n.py
 ==================
-Kawasaki RS007N (Robot 1) - parameter based DH model.
-
-Job in MediAssist: pick the requested colour coded medication container
-off the storage shelf and place it on the transfer plate for the Doosan.
-
-WHERE THE NUMBERS COME FROM
-    Link lengths:   Kawasaki's own ROS description of the RS007N
-                    (khi_robot package, rs007n_macro.xacro)
-    Joint limits:   Kawasaki RS007N standard specification sheet
-                    (90151-0313DEC)
-    Cross check:    shoulder-to-wrist reach = 0.355 + 0.375 = 0.730 m,
-                    which matches the 730 mm max reach on the datasheet.
-
-Stage 1: kinematics + simple cylinder graphics (A1 style).
-         Realistic visuals come in the next stage.
-
-Check the model:          python robots/kawasaki_rs007n.py
-Show it in the ward:      python robots/kawasaki_rs007n.py --swift
 """
 
 import numpy as np
@@ -112,8 +94,8 @@ class KawasakiRS007N(DHRobot):
         self.qhome = np.deg2rad([0.0, 0.0, 90.0, 0.0, 90.0, 0.0])
         self.q = self.qhome.copy()
 
-        self._shapes = []
-        self._env = None
+        self._gfx_shapes = []
+        self._gfx_env = None
 
     # ==================================================================
     # FORWARD KINEMATICS
@@ -210,7 +192,7 @@ class KawasakiRS007N(DHRobot):
     def add_to_env(self, env):
         if sg is None:
             raise ImportError("spatialgeometry is required for graphics")
-        self._env = env
+        self._gfx_env = env
         frames = self.link_frames()
         white = (0.93, 0.93, 0.91, 1.0)
         grey = (0.35, 0.37, 0.40, 1.0)
@@ -221,24 +203,24 @@ class KawasakiRS007N(DHRobot):
         env.add(self._base_shape)
 
         # Link cylinders between consecutive frame origins
-        self._shapes = []
+        self._gfx_shapes = []
         for i in range(6):
             T, L = self._segment_pose(frames[i].t, frames[i + 1].t)
             if L < 1e-6:
                 continue        # frames on top of each other (wrist)
             cyl = sg.Cylinder(radius=0.045, length=L, pose=T, color=white)
             env.add(cyl)
-            self._shapes.append(("link", i, cyl))
+            self._gfx_shapes.append(("link", i, cyl))
 
         # Joint markers along each joint axis (z of the frame before it)
         for i in range(6):
             jc = sg.Cylinder(radius=0.055, length=0.11,
                              pose=frames[i], color=grey)
             env.add(jc)
-            self._shapes.append(("joint", i, jc))
+            self._gfx_shapes.append(("joint", i, jc))
 
-        self._tool = sg.Sphere(radius=0.02, color=(0.9, 0.1, 0.1, 1.0))
-        env.add(self._tool)
+        self._tool_marker = sg.Sphere(radius=0.02, color=(0.9, 0.1, 0.1, 1.0))
+        env.add(self._tool_marker)
 
         self.update()
         return self
@@ -247,17 +229,17 @@ class KawasakiRS007N(DHRobot):
         """Re-pose every shape from the current joint angles."""
         if q is not None:
             self.q = np.asarray(q, dtype=float)
-        if not self._shapes:
+        if not self._gfx_shapes:
             return
         frames = self.link_frames()
         self._base_shape.T = frames[0] * SE3(0, 0, 0.10)
-        for kind, i, shape in self._shapes:
+        for kind, i, shape in self._gfx_shapes:
             if kind == "link":
                 shape.T, _ = self._segment_pose(frames[i].t,
                                                 frames[i + 1].t)
             else:
                 shape.T = frames[i]
-        self._tool.T = frames[6]
+        self._tool_marker.T = frames[6]
 
 
 # ======================================================================
