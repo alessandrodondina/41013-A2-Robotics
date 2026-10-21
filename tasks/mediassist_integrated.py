@@ -20,6 +20,7 @@ import layout
 from tasks.kawasaki_pick_place import KawasakiCell
 from environment.sensors import RGBDCamera, PhotoelectricSensor
 from robot_models.doosan_m0609 import create_doosan, JOINT_XYZ, JOINT_RPY
+from tasks.safety_control import SafetyControl, SimulationStopped
 
 RAIL_Y, BASE_Z, CARRIAGE_Z = .75, .96, .90
 TRANSFER_X, TRANSFER_Y, TRANSFER_Z = 1.65, .12, .83
@@ -152,6 +153,7 @@ def plan_rail_safe_path(start,goal):
     raise RuntimeError('No collision-clear path found after planning; robot remains stopped.')
 
 def main():
+    safety=SafetyControl()
     env=swift.Swift()
     env.launch(realtime=True)
     containers=build_ward(env)
@@ -199,88 +201,124 @@ def main():
             duration=max(.4,seconds*distance/total)
             n=max(2,int(duration/.05))
             for i in range(n+1):
+                safety.check()
                 u=i/n;s=10*u**3-15*u**4+6*u**5
                 state=a+(b-a)*s
                 x=float(state[0]);q=state[1:].copy()
                 redraw();env.step(.05);time.sleep(.05)
-    redraw(); env.step(.1)
-    # Stage 1: Kawasaki moves the real red cylinder to the transfer plate.
-    print("\nSTAGE 1 — Kawasaki picking RED medication", flush=True)
     try:
-        kawasaki = KawasakiCell(env)
-        camera = RGBDCamera(env)
-        sensor = PhotoelectricSensor(env)
-        kawasaki.pause(1.0)
-        kawasaki.pick_and_place(bottle, layout.MEDICATION_SLOTS["red"][0],
-                                layout.TRANSFER_POINT, camera=camera, sensor=sensor)
-        # Keep Kawasaki in its home position as Doosan takes over.
-        bottle.T = SE3(TRANSFER_X, TRANSFER_Y, TRANSFER_Z + BOTTLE_H / 2)
-        print("STAGE 2 — Doosan collecting RED medication", flush=True)
+        redraw(); env.step(.1)
+        # Stage 1: Kawasaki moves the real red cylinder to the transfer plate.
+        print("\nSTAGE 1 — Kawasaki picking RED medication", flush=True)
+        try:
+            kawasaki = KawasakiCell(env)
+            kawasaki.safety = safety
+            camera = RGBDCamera(env)
+            sensor = PhotoelectricSensor(env)
+            kawasaki.pause(1.0)
+            kawasaki.pick_and_place(bottle, layout.MEDICATION_SLOTS["red"][0],
+                                    layout.TRANSFER_POINT, camera=camera, sensor=sensor)
+            # Keep Kawasaki in its home position as Doosan takes over.
+            bottle.T = SE3(TRANSFER_X, TRANSFER_Y, TRANSFER_Z + BOTTLE_H / 2)
+            print("STAGE 2 — Doosan collecting RED medication", flush=True)
+        except SimulationStopped:
+            print("[SAFETY] Kawasaki task cancelled; Doosan will not start.", flush=True)
+            raise
+        except Exception as exc:
+            print("Kawasaki failed; Doosan will NOT start a fake handoff:", repr(exc), flush=True)
+            raise
+        print('\nMediAssist — rail collision-aware path planning',flush=True)
+        try:
+            patient=2
+            tx,ty,tz=TABLES[patient]
+            drop_x=float(np.clip(tx,.15,3.20))
+            pickup_z=TRANSFER_Z+BOTTLE_H
+            drop_z=tz+BOTTLE_H
+            print('Solving rail-clear pickup/drop configurations...',flush=True)
+            qa=solve_ik(robot,TRANSFER_X,SE3(TRANSFER_X,TRANSFER_Y,pickup_z+.15),q)
+            qb=solve_ik(robot,TRANSFER_X,SE3(TRANSFER_X,TRANSFER_Y,pickup_z),qa)
+            qc=solve_ik(robot,drop_x,SE3(tx,ty,drop_z+.15),qb)
+            qd=solve_ik(robot,drop_x,SE3(tx,ty,drop_z),qc)
+            print('Checking motion and delivering...',flush=True)
+            move(TRANSFER_X,qa,2)
+            move(TRANSFER_X,qb,1.5)
+            robot.base=base_pose(x); robot.q=q
+            grasp=robot.fkine(q).inv()*bottle.T
+            holding=True
+            # The container has been grasped and is leaving the transfer plate.
+            # Return the simulated photoelectric presence indicator to RED (empty).
+            sensor.set_detected(False)
+            env.step(.05)
+            move(TRANSFER_X,qa,1.5)
+            move(drop_x,qc,3)
+            move(drop_x,qd,1.5)
+            # Visual placement correction: V2's end-effector reaches its target,
+            # but its unconstrained wrist can leave the bottle offset from the table.
+            # Blend the upright bottle to the table over 1.5 s, without snapping.
+            # Keep the arm stationary during this virtual handoff; all arm moves
+            # remain subject to V2's collision-aware planner.
+            start_pos=np.asarray(bottle.T,dtype=float)[:3,3].copy()
+            end_pos=np.array([tx,ty,tz+BOTTLE_H/2],dtype=float)
+            print('Final tabletop placement offset:',round(float(np.linalg.norm(end_pos-start_pos)),3),'m',flush=True)
+            # Visual final placement: hold the arm stationary, move the upright
+            # bottle to the exact tabletop height, then release the virtual grasp.
+            # This is a visual correction, not a physically modelled gripper.
+            for k in range(61):
+                safety.check()
+                u=k/60
+                s=10*u**3-15*u**4+6*u**5
+                p=start_pos+(end_pos-start_pos)*s
+                bottle.T=SE3(*[float(v) for v in p])
+                env.step(.05)
+                time.sleep(.05)
+            # Settle on the table before releasing the virtual grasp.
+            for _ in range(12):
+                safety.check()
+                env.step(.05)
+                time.sleep(.05)
+            holding=False
+            print('Medication released on bedside table.',flush=True)
+            move(drop_x,qc,1.5)
+            print('Delivery completed.',flush=True)
+        except SimulationStopped:
+            print("[SAFETY] Doosan task cancelled.", flush=True)
+            raise
+        except RuntimeError as exc:
+            print("[PLANNING]", str(exc), flush=True)
+            raise
+        print('Delivery complete. Awaiting next operator command.', flush=True)
+
+    except SimulationStopped:
+        print('[SAFETY] Motion cancelled. Swift remains OPEN and stationary.', flush=True)
     except Exception as exc:
-        print("Kawasaki failed; Doosan will NOT start a fake handoff:", repr(exc), flush=True)
-        raise
-    print('\nMediAssist — rail collision-aware path planning',flush=True)
-    try:
-        patient=2
-        tx,ty,tz=TABLES[patient]
-        drop_x=float(np.clip(tx,.15,3.20))
-        pickup_z=TRANSFER_Z+BOTTLE_H
-        drop_z=tz+BOTTLE_H
-        print('Solving rail-clear pickup/drop configurations...',flush=True)
-        qa=solve_ik(robot,TRANSFER_X,SE3(TRANSFER_X,TRANSFER_Y,pickup_z+.15),q)
-        qb=solve_ik(robot,TRANSFER_X,SE3(TRANSFER_X,TRANSFER_Y,pickup_z),qa)
-        qc=solve_ik(robot,drop_x,SE3(tx,ty,drop_z+.15),qb)
-        qd=solve_ik(robot,drop_x,SE3(tx,ty,drop_z),qc)
-        print('Checking motion and delivering...',flush=True)
-        move(TRANSFER_X,qa,2)
-        move(TRANSFER_X,qb,1.5)
-        robot.base=base_pose(x); robot.q=q
-        grasp=robot.fkine(q).inv()*bottle.T
-        holding=True
-        # The container has been grasped and is leaving the transfer plate.
-        # Return the simulated photoelectric presence indicator to RED (empty).
-        sensor.set_detected(False)
-        env.step(.05)
-        move(TRANSFER_X,qa,1.5)
-        move(drop_x,qc,3)
-        move(drop_x,qd,1.5)
-        # Visual placement correction: V2's end-effector reaches its target,
-        # but its unconstrained wrist can leave the bottle offset from the table.
-        # Blend the upright bottle to the table over 1.5 s, without snapping.
-        # Keep the arm stationary during this virtual handoff; all arm moves
-        # remain subject to V2's collision-aware planner.
-        start_pos=np.asarray(bottle.T,dtype=float)[:3,3].copy()
-        end_pos=np.array([tx,ty,tz+BOTTLE_H/2],dtype=float)
-        print('Final tabletop placement offset:',round(float(np.linalg.norm(end_pos-start_pos)),3),'m',flush=True)
-        # Visual final placement: hold the arm stationary, move the upright
-        # bottle to the exact tabletop height, then release the virtual grasp.
-        # This is a visual correction, not a physically modelled gripper.
-        for k in range(61):
-            u=k/60
-            s=10*u**3-15*u**4+6*u**5
-            p=start_pos+(end_pos-start_pos)*s
-            bottle.T=SE3(*[float(v) for v in p])
-            env.step(.05)
-            time.sleep(.05)
-        # Settle on the table before releasing the virtual grasp.
-        for _ in range(12):
-            env.step(.05)
-            time.sleep(.05)
-        holding=False
-        print('Medication released on bedside table.',flush=True)
-        move(drop_x,qc,1.5)
-        print('Delivery completed.',flush=True)
-    except RuntimeError as exc:
-        print('\n'+str(exc),flush=True)
-        print('Planning stopped before the rejected segment; working backup is unchanged.',flush=True)
-    print('Swift stays open. Ctrl+C to quit.',flush=True)
+        print('[FAULT] Task stopped:', repr(exc), flush=True)
+    else:
+        print('[SAFETY] Delivery sequence ended; awaiting operator.', flush=True)
+        safety.complete()
+    # No further robot trajectory commands. Preserve the scene during STOP and RESET.
+    # Only a separate START requests worker shutdown and a fresh initial scene.
+    print('[SAFETY] Holding current robot poses until START NEW DELIVERY.', flush=True)
     try:
         while True:
-            env.step(.05); time.sleep(.05)
-    except KeyboardInterrupt:
-        pass
+            state = safety.status()
+            if state == 'RESTARTING':
+                print('[SAFETY] New task authorised. Closing previous scene.', flush=True)
+                break
+            env.step(.05)
+            time.sleep(.05)
     finally:
+        safety.close()
         env.close()
 
-if __name__=='__main__':
-    main()
+if __name__ == '__main__':
+    import sys
+    if '--worker' not in sys.argv:
+        from tasks.safety_control import SafetyLauncher
+        SafetyLauncher().run()
+    else:
+        try:
+            main()
+        except SimulationStopped as exc:
+            print('[SAFETY] Worker stopped:', exc, flush=True)
+        except KeyboardInterrupt:
+            print('[SAFETY] Worker interrupted.', flush=True)

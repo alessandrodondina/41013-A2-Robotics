@@ -54,6 +54,8 @@ class KawasakiCell:
     # ------------------------------------------------------------------
     def show(self, q):
         """Move the robot to q and drag the gripper / held object along."""
+        if hasattr(self, "safety"):
+            self.safety.check()
         self.bot.update(q)
         T_flange = self.bot.fk()
         self.gripper.update(T_flange)
