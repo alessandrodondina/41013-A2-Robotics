@@ -21,6 +21,7 @@ from tasks.kawasaki_pick_place import KawasakiCell
 from environment.sensors import RGBDCamera, PhotoelectricSensor
 from robot_models.doosan_m0609 import create_doosan, JOINT_XYZ, JOINT_RPY
 from tasks.safety_control import SafetyControl, SimulationStopped
+from tasks.safety_equipment import SafetyEquipment
 
 RAIL_Y, BASE_Z, CARRIAGE_Z = .75, .96, .90
 TRANSFER_X, TRANSFER_Y, TRANSFER_Z = 1.65, .12, .83
@@ -157,6 +158,233 @@ def main():
     env=swift.Swift()
     env.launch(realtime=True)
     containers=build_ward(env)
+    equipment=SafetyEquipment(env, layout.KAWASAKI_BASE)
+    safety.on_status = equipment.update
+
+    # Compact Kawasaki medication-workstation light curtain.
+    # Simulated optical guarding; not a physical safety device.
+    from urllib.request import Request, urlopen
+    import json
+
+    yellow = [0.96, 0.75, 0.08, 1]
+    dark = [0.12, 0.15, 0.18, 1]
+    beam = [0.15, 0.75, 1.0, 0.20]
+
+    def curtain_box(size, pos, color):
+        obj = Cuboid(scale=size, pose=SE3(*pos), color=color)
+        env.add(obj)
+        return obj
+
+    # Workstation centre: (1.65, -0.29).
+    # The curtain is slightly wider than the tabletop.
+    xmin, xmax = 0.94, 2.36
+    ymin, ymax = -1.00, 0.39
+
+    corners = [
+        (xmin, ymin),
+        (xmax, ymin),
+        (xmax, ymax),
+        (xmin, ymax),
+    ]
+
+    # Taller tabletop posts; transfer side deliberately has no beams.
+    for cx, cy in corners:
+        curtain_box(
+            [0.055, 0.055, 0.91],
+            (cx, cy, 1.225),
+            yellow
+        )
+        curtain_box(
+            [0.10, 0.10, 0.025],
+            (cx, cy, 0.78),
+            dark
+        )
+
+    # Three optical beam levels above the workstation.
+    for i in (0, 1, 3):  # no beam on y=ymax, Doosan transfer side
+        x1, y1 = corners[i]
+        x2, y2 = corners[(i + 1) % 4]
+
+        for z in (0.90, 1.20, 1.52):
+            curtain_box(
+                [
+                    max(abs(x2-x1), 0.012),
+                    max(abs(y2-y1), 0.012),
+                    0.006
+                ],
+                ((x1+x2)/2, (y1+y2)/2, z),
+                beam
+            )
+
+    # Kawasaki light-curtain test actor.
+    # Person stays outside the table and extends one arm into the beam.
+    person_y = -0.40
+    person_x = xmin - 0.95
+
+    arm_length = 0.42
+    arm_height = 0.94
+
+    person_parts = [
+        # Torso
+        curtain_box(
+            [0.24, 0.16, 0.48],
+            (person_x, person_y, 0.75),
+            [1.0, 0.35, 0.12, 1]
+        ),
+        # Legs
+        curtain_box(
+            [0.10, 0.11, 0.40],
+            (person_x - 0.07, person_y, 0.30),
+            dark
+        ),
+        curtain_box(
+            [0.10, 0.11, 0.40],
+            (person_x + 0.07, person_y, 0.30),
+            dark
+        ),
+        # Upright head
+        Cylinder(
+            radius=0.12,
+            length=0.22,
+            pose=SE3(person_x, person_y, 1.10),
+            color=[0.96, 0.72, 0.50, 1]
+        ),
+        # One simple arm reaching forward.
+        curtain_box(
+            [arm_length, 0.09, 0.09],
+            (person_x + 0.12 + arm_length / 2,
+             person_y, arm_height),
+            [1.0, 0.35, 0.12, 1]
+        ),
+    ]
+
+    env.add(person_parts[3])
+
+    # Hide all parts until the curtain test is requested.
+    for obj in person_parts:
+        obj.T = SE3(person_x, person_y, -3)
+
+    curtain_triggered = False
+
+    def curtain_tick():
+        nonlocal person_x, curtain_triggered
+
+        if curtain_triggered:
+            return
+
+        try:
+            with urlopen(safety.url, timeout=0.5) as response:
+                status = json.load(response)
+        except Exception:
+            return
+
+        if not status.get('intrusion_requested'):
+            return
+
+        # Walk toward the workcell with arm extended.
+        # Stop the hand at the curtain boundary.
+        hand_offset = 0.12 + arm_length
+        person_x = min(
+            xmin - hand_offset,
+            person_x + 0.025
+        )
+
+        person_parts[0].T = SE3(person_x, person_y, 0.75)
+        person_parts[1].T = SE3(person_x - 0.07, person_y, 0.30)
+        person_parts[2].T = SE3(person_x + 0.07, person_y, 0.30)
+        person_parts[3].T = SE3(person_x, person_y, 1.10)
+
+        person_parts[4].T = SE3(
+            person_x + 0.12 + arm_length / 2,
+            person_y,
+            arm_height
+        )
+
+        # Trigger exactly when the arm reaches the beam.
+        if person_x + hand_offset >= xmin - 0.001:
+            curtain_triggered = True
+            print(
+                '[LIGHT CURTAIN] Worker arm interrupted the beam.',
+                flush=True
+            )
+
+            try:
+                urlopen(
+                    Request(
+                        safety.url.replace(
+                            '/status', '/curtain_breach'
+                        ),
+                        data=b'',
+                        method='POST'
+                    ),
+                    timeout=0.5
+                ).close()
+            except Exception as exc:
+                print(
+                    '[LIGHT CURTAIN] Signal failed:',
+                    exc,
+                    flush=True
+                )
+
+    # Two rail-end approach scanners. A simulated worker advances from
+    # outside either rail end and triggers only on crossing the defined
+    # scanner threshold. This is illustrative 2D access monitoring.
+    scanner_people = {}
+    for side, sx, direction in (("left", -1.04, 1), ("right", 4.37, -1)):
+        sy = 0.73
+        parts = [
+            curtain_box([0.23, 0.16, 0.46], (sx, sy, 0.73), [0.92, 0.38, 0.12, 1]),
+            curtain_box([0.09, 0.10, 0.38], (sx-0.07, sy, 0.29), dark),
+            curtain_box([0.09, 0.10, 0.38], (sx+0.07, sy, 0.29), dark),
+            Cylinder(radius=0.11, length=0.21, pose=SE3(sx, sy, 1.08),
+                     color=[0.96, 0.72, 0.50, 1]),
+        ]
+        env.add(parts[-1])
+        # Keep inactive demonstration actors hidden until requested.
+        for obj in parts:
+            obj.T = SE3(sx, sy, -3)
+        scanner_people[side] = {"x": sx, "start": sx, "direction": direction,
+                                "y": sy, "parts": parts}
+    scanner_triggered = False
+
+    def scanner_tick():
+        nonlocal scanner_triggered
+        if scanner_triggered:
+            return
+        try:
+            with urlopen(safety.url, timeout=0.5) as response:
+                status = json.load(response)
+        except Exception:
+            return
+        side = status.get('scanner_requested')
+        if side not in scanner_people:
+            return
+        actor = scanner_people[side]
+        actor['x'] += 0.028 * actor['direction']
+        px, py = actor['x'], actor['y']
+        for obj, dx, z in zip(actor['parts'], (0, -0.07, 0.07, 0),
+                              (0.73, 0.29, 0.29, 1.08)):
+            obj.T = SE3(px + dx, py, z)
+        # Left and right scanner protective-field entry planes.
+        crossed = (px + 0.12 >= -0.20) if side == 'left' else (px - 0.12 <= 3.62)
+        if crossed:
+            scanner_triggered = True
+            print('[RAIL SCANNER] %s approach detected inside protective field.' % side.upper(), flush=True)
+            try:
+                urlopen(Request(safety.url.replace('/status', '/scanner_breach'),
+                                data=b'', method='POST'), timeout=0.5).close()
+            except Exception as exc:
+                print('[RAIL SCANNER] Signal failed:', exc, flush=True)
+
+    original_check = safety.check
+
+    def checked_motion():
+        curtain_tick()
+        scanner_tick()
+        original_check()
+
+    safety.check = checked_motion
+
     robot=create_doosan()
     carriage=Cuboid(scale=[.38,.40,.12],pose=SE3(TRANSFER_X,RAIL_Y,CARRIAGE_Z),color=[.2,.25,.32,1])
     env.add(carriage)
@@ -250,34 +478,51 @@ def main():
             sensor.set_detected(False)
             env.step(.05)
             move(TRANSFER_X,qa,1.5)
+            # Calculate where the bottle will be, including its grasp offset.
+            desired_pos = np.array([tx, ty, tz + BOTTLE_H / 2], dtype=float)
+            grasp_matrix = np.asarray(grasp, dtype=float)
+
+            robot.base = base_pose(drop_x)
+            target_q = qd.copy()
+
+            # Correct the arm target, rather than moving the bottle separately.
+            for _ in range(5):
+                ee = np.asarray(robot.fkine(target_q), dtype=float)
+                predicted = (ee @ grasp_matrix)[:3, 3]
+                error = desired_pos - predicted
+
+                if np.linalg.norm(error) < .012:
+                    break
+
+                corrected_ee = ee[:3, 3] + error
+                target_q = solve_ik(
+                    robot, drop_x, SE3(*corrected_ee), target_q
+                )
+
+            ee = np.asarray(robot.fkine(target_q), dtype=float)
+            predicted = (ee @ grasp_matrix)[:3, 3]
+            error_mm = float(np.linalg.norm(desired_pos - predicted) * 1000)
+
+            print(
+                '[PLACEMENT] Predicted bottle offset: %.1f mm' % error_mm,
+                flush=True
+            )
+
+            if error_mm > 20:
+                raise RuntimeError(
+                    'Bottle placement could not be aligned within 20 mm.'
+                )
+
+            # Carry bottle to table using actual robot movement.
             move(drop_x,qc,3)
-            move(drop_x,qd,1.5)
-            # Visual placement correction: V2's end-effector reaches its target,
-            # but its unconstrained wrist can leave the bottle offset from the table.
-            # Blend the upright bottle to the table over 1.5 s, without snapping.
-            # Keep the arm stationary during this virtual handoff; all arm moves
-            # remain subject to V2's collision-aware planner.
-            start_pos=np.asarray(bottle.T,dtype=float)[:3,3].copy()
-            end_pos=np.array([tx,ty,tz+BOTTLE_H/2],dtype=float)
-            print('Final tabletop placement offset:',round(float(np.linalg.norm(end_pos-start_pos)),3),'m',flush=True)
-            # Visual final placement: hold the arm stationary, move the upright
-            # bottle to the exact tabletop height, then release the virtual grasp.
-            # This is a visual correction, not a physically modelled gripper.
-            for k in range(61):
-                safety.check()
-                u=k/60
-                s=10*u**3-15*u**4+6*u**5
-                p=start_pos+(end_pos-start_pos)*s
-                bottle.T=SE3(*[float(v) for v in p])
-                env.step(.05)
-                time.sleep(.05)
-            # Settle on the table before releasing the virtual grasp.
-            for _ in range(12):
-                safety.check()
-                env.step(.05)
-                time.sleep(.05)
+            move(drop_x,target_q,1.5)
+
+            # Detach bottle at its actual held position.
+            safety.check()
             holding=False
             print('Medication released on bedside table.',flush=True)
+
+            # Original working retreat.
             move(drop_x,qc,1.5)
             print('Delivery completed.',flush=True)
         except SimulationStopped:

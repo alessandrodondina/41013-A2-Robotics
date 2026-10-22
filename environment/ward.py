@@ -45,7 +45,7 @@ def build_ward(env):
     # Large grey work surface
     box(env, "Medication workstation",
         (1.65, -0.29, 0.72),
-        (1.25, 1.22, 0.10),
+        (1.55, 1.55, 0.10),
         (0.70, 0.73, 0.77, 1))
 
     # Workstation support
@@ -115,11 +115,7 @@ def build_ward(env):
         (rail_length - 0.15, 0.22, rail_height),
         (0.52, 0.56, 0.62, 1))
 
-    # Empty carriage for future Doosan
-    box(env, "Doosan carriage",
-        (1.65, rail_y, rail_height + 0.25),
-        (0.38, 0.40, 0.12),
-        (0.48, 0.53, 0.60, 1))
+    # Moving carriage will be created by the robot simulation.
 
     # THREE BEDS - bottom of diagram
     # Spacing gives each bed its own bedside table.
