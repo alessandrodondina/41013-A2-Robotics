@@ -1,20 +1,7 @@
 """
 sensors.py
 ==========
-Placeholder models of the two sensors in the Kawasaki half of the cell.
-Visual only for now - they don't read any real data yet.
-
-RGBDCamera
-    Hangs on a boom above the medication shelf, looking down at the
-    containers. identify() shows a scan ray and a highlight box around
-    the container it has "recognised".
-
-PhotoelectricSensor
-    Sits beside the transfer plate with a reflector on the other side.
-    The beam is red while the plate is empty and turns green once a
-    container breaks it.
-
-Both are positioned from layout.py so they move if the shelf or plate do.
+Placeholder models of the two sensors
 """
 
 import numpy as np
