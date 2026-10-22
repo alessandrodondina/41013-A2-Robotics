@@ -48,7 +48,7 @@ class SafetyControl:
     def close(self):
         pass  # The persistent launcher owns the browser GUI.
 
-PAGE = '''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>MediAssist Safety</title><style>body{font-family:system-ui;background:#111827;color:#fff;max-width:540px;margin:45px auto;padding:22px}button{padding:18px;margin:7px;border:0;border-radius:10px;font-size:19px;font-weight:bold;cursor:pointer}button:disabled{opacity:.35;cursor:not-allowed}#stop{background:#e11d48;color:white;width:96%;font-size:26px}#reset{background:#f59e0b}#start{background:#10b981}#state{padding:20px;background:#374151;border-radius:10px;font-size:23px}small{color:#cbd5e1}</style></head><body><h1>MediAssist | Safety Controls</h1><div id="state">Connecting...</div><p style="font-size:14px;color:#cbd5e1">🟢 SAFE / IDLE &nbsp; 🟠 OPERATING &nbsp; 🔴 STOP / FAULT</p><button id="stop" onclick="send('stop')">EMERGENCY STOP</button><button id="reset" onclick="send('reset')">RESET / ACKNOWLEDGE</button><button id="start" onclick="send('start')">START NEW DELIVERY</button><p><small>Simulation-only interlock, not a hardware E-stop. STOP cancels the current task. RESET never causes motion. START launches a fresh Swift simulation from its initial configuration, not from the interrupted pose.</small></p><script>async function send(x){try{await fetch('/'+x,{method:'POST'});await refresh()}catch(e){document.getElementById('state').textContent='Controller disconnected'}}async function refresh(){try{let r=await fetch('/status',{cache:'no-store'});let j=await r.json();let mode=['E-STOPPED','FAULT'].includes(j.state)?'STOP / FAULT':j.state==='RUNNING'?'OPERATING':'SAFE / IDLE';let el=document.getElementById('state');el.textContent='● '+mode+' — '+j.state;el.style.color=mode==='STOP / FAULT'?'#fb7185':mode==='OPERATING'?'#fbbf24':'#4ade80';document.getElementById('reset').disabled=j.state!=='E-STOPPED';document.getElementById('start').disabled=!['READY','RESET - WAITING FOR START','COMPLETE','FAULT'].includes(j.state);document.getElementById('stop').disabled=j.state==='E-STOPPED'}catch(e){document.getElementById('state').textContent='Controller disconnected'}}setInterval(refresh,300);refresh()</script></body></html>'''
+PAGE = '''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>MediAssist Safety</title><style>body{font-family:system-ui;background:#111827;color:#fff;max-width:540px;margin:45px auto;padding:22px}button{padding:18px;margin:7px;border:0;border-radius:10px;font-size:19px;font-weight:bold;cursor:pointer}button:disabled{opacity:.35;cursor:not-allowed}#stop{background:#e11d48;color:white;width:96%;font-size:26px}#reset{background:#f59e0b}#start{background:#10b981}#state{padding:20px;background:#374151;border-radius:10px;font-size:23px}small{color:#cbd5e1}</style></head><body><h1>MediAssist | Safety Controls</h1><div id="state">Connecting...</div><button id="stop" onclick="send('stop')">EMERGENCY STOP</button><button id="intrusion" onclick="send('intrusion')" style="background:#f59e0b;color:#111827;width:96%">SIMULATE PERSON ENTERING</button><div style="display:flex;gap:8px"><button id="scanner_left" onclick="send('scanner_left')" style="background:#334155;color:#e2e8f0;flex:1;font-size:14px">TEST RIGHT SCANNER</button><button id="scanner_right" onclick="send('scanner_right')" style="background:#334155;color:#e2e8f0;flex:1;font-size:14px">TEST LEFT SCANNER</button></div><button id="reset" onclick="send('reset')">RESET / ACKNOWLEDGE</button><button id="start" onclick="send('start')">START NEW DELIVERY</button><script>async function send(x){try{await fetch('/'+x,{method:'POST'});await refresh()}catch(e){document.getElementById('state').textContent='Controller disconnected'}}async function refresh(){try{let r=await fetch('/status',{cache:'no-store'});let j=await r.json();let mode=['E-STOPPED','FAULT','ZONE BREACH','SCANNER BREACH'].includes(j.state)?'STOP / FAULT':j.state==='RUNNING'?'OPERATING':'SAFE / IDLE';let el=document.getElementById('state');el.textContent='● '+mode+' — '+j.state;el.style.color=mode==='STOP / FAULT'?'#fb7185':mode==='OPERATING'?'#fbbf24':'#4ade80';document.getElementById('reset').disabled=!['E-STOPPED','ZONE BREACH','SCANNER BREACH'].includes(j.state);document.getElementById('intrusion').disabled=j.state!=='RUNNING';document.getElementById('scanner_left').disabled=j.state!=='RUNNING'||!!j.scanner_requested;document.getElementById('scanner_right').disabled=j.state!=='RUNNING'||!!j.scanner_requested;document.getElementById('start').disabled=!['READY','RESET - WAITING FOR START','COMPLETE','FAULT'].includes(j.state);document.getElementById('stop').disabled=j.state==='E-STOPPED'}catch(e){document.getElementById('state').textContent='Controller disconnected'}}setInterval(refresh,300);refresh()</script></body></html>'''
 
 class SafetyLauncher:
     def __init__(self, port=PORT):
@@ -56,6 +56,8 @@ class SafetyLauncher:
         self.state = 'READY'
         self.process = None
         self.generation = 0
+        self.intrusion_requested = False
+        self.scanner_requested = None
         controller = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -64,7 +66,7 @@ class SafetyLauncher:
             def do_GET(self):
                 if self.path == '/status':
                     with controller.lock:
-                        data = json.dumps({'state': controller.state}).encode()
+                        data = json.dumps({'state': controller.state, 'intrusion_requested': controller.intrusion_requested, 'scanner_requested': controller.scanner_requested}).encode()
                     self.send_response(200)
                     self.send_header('Content-Type', 'application/json')
                     self.send_header('Cache-Control', 'no-store')
@@ -83,9 +85,21 @@ class SafetyLauncher:
                     if self.path == '/stop':
                         controller.state = 'E-STOPPED'
                         print('[SAFETY] STOP latched; worker must abort.', flush=True)
-                    elif self.path == '/reset' and controller.state == 'E-STOPPED':
+                    elif self.path == '/intrusion' and controller.state == 'RUNNING':
+                        controller.intrusion_requested = True
+                        print('[SIMULATION] Person entering light curtain.', flush=True)
+                    elif self.path in ('/scanner_left', '/scanner_right') and controller.state == 'RUNNING':
+                        controller.scanner_requested = self.path.split('_')[-1]
+                        print('[SIMULATION] Worker approaching %s rail scanner.' % controller.scanner_requested, flush=True)
+                    elif self.path == '/scanner_breach' and controller.state == 'RUNNING' and controller.scanner_requested:
+                        controller.state = 'SCANNER BREACH'
+                        print('[RAIL SCANNER] Protective field breached: stop latched.', flush=True)
+                    elif self.path == '/reset' and controller.state in ('E-STOPPED','ZONE BREACH','SCANNER BREACH','SCANNER BREACH'):
                         controller.state = 'RESET - WAITING FOR START'
                         print('[SAFETY] Acknowledged. No motion permitted.', flush=True)
+                    elif self.path == '/curtain_breach' and controller.state == 'RUNNING' and controller.intrusion_requested:
+                        controller.state = 'ZONE BREACH'
+                        print('[LIGHT CURTAIN] Beam interrupted: safety stop latched.', flush=True)
                     elif self.path == '/complete' and controller.state == 'RUNNING':
                         controller.state = 'COMPLETE'
                     elif self.path == '/start' and controller.state in ('READY','RESET - WAITING FOR START','COMPLETE','FAULT'):
@@ -103,6 +117,8 @@ class SafetyLauncher:
 
     def launch_worker(self):
         self.state = 'RUNNING'
+        self.intrusion_requested = False
+        self.scanner_requested = None
         self.generation += 1
         generation = self.generation
         self.process = subprocess.Popen([sys.executable, '-m', 'tasks.mediassist_integrated', '--worker'])
