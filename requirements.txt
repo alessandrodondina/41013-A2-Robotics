@@ -1,16 +1,21 @@
 # MediAssist Robots - Python dependencies
+# Requires Python 3.10, 3.11 or 3.12 (ir-support does not support 3.13+)
+#
 # Create a local venv (not committed, see .gitignore):
-#   python -m venv .venv
+#   py -3.11 -m venv .venv
 #   .venv\Scripts\activate          (Windows)
 #   source .venv/bin/activate       (macOS/Linux)
 #   pip install -r requirements.txt
 #
-# ir_support is the 41013 subject package. If pip can't find it,
-# install it the same way you did for Lab Assignment 1.
+# Versions are pinned on purpose. ir-support needs swift-sim 1.x, and
+# swift-sim 1.x only works with spatialgeometry 1.1.0. Newer
+# spatialgeometry / roboticstoolbox releases break Swift with:
+#   AttributeError: 'Cuboid' object has no attribute '_update_pyb'
 
 ir-support
-roboticstoolbox-python
-swift-sim
-spatialmath-python
-spatialgeometry
-numpy
+swift-sim==1.1.0
+spatialgeometry==1.1.0
+roboticstoolbox-python==1.1.0
+spatialmath-python>=1.1.16,<1.2
+numpy<2
+scipy<1.12

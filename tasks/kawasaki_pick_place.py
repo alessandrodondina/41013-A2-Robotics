@@ -4,7 +4,7 @@ kawasaki_pick_place.py
 Robot 1 task: the Kawasaki RS007N picks a medication container off the
 storage shelf and places it on the transfer plate.
 
-Motion choices (and why):
+*Notes for my VIVA* - Motion choices:
     Big moves between areas  -> joint space trajectory (jtraj).
         Smooth, fast, and every joint stays inside its limits. The exact
         path of the tool doesn't matter while it's high in free space.
@@ -13,9 +13,10 @@ Motion choices (and why):
         fingers don't clip the neighbouring containers. jtraj can't
         promise a straight line, RMRC can.
 
-Run (from the repo root):
-    python tasks/kawasaki_pick_place.py            picks red container
-    python tasks/kawasaki_pick_place.py green 1    picks the 2nd green one
+The RGB-D camera finds the requested colour and its 3D position; the
+robot picks at the DETECTED position, not a hard coded one.
+
+Each run saves what the camera saw to captures/latest_detection.png
 """
 
 import os
@@ -201,13 +202,30 @@ class KawasakiCell:
         print("  done.")
 
 
+def find_object_at(containers, point, tol=0.03):
+    """The Swift container sitting at a detected position (the gripper
+    grabs whatever is physically there)."""
+    for obj in containers:
+        if np.linalg.norm(SE3(obj.T).t - point) < tol:
+            return obj
+    return None
+
+
+def parse_order(text):
+    """'bed_2 green', 'bed_2=green' or just 'green' -> (bed, colour)."""
+    parts = text.replace("=", " ").lower().split()
+    colour = next((p for p in parts if p in layout.MEDICATION_SLOTS), None)
+    bed = next((p for p in parts if p in layout.BEDS), None)
+    return bed, colour
+
+
 def main():
     import swift
     from environment.ward import build_ward
     from environment.sensors import RGBDCamera, PhotoelectricSensor
-
-    colour = sys.argv[1] if len(sys.argv) > 1 else "red"
-    index = int(sys.argv[2]) if len(sys.argv) > 2 else 0
+    from perception.rgbd_detection import (PinholeCamera, SimulatedRGBD,
+                                           detect_containers,
+                                           save_debug_image)
 
     env = swift.Swift()
     env.launch(realtime=True)
@@ -215,20 +233,81 @@ def main():
     camera = RGBDCamera(env)
     sensor = PhotoelectricSensor(env)
 
-    # Match the requested colour/index to the actual cylinder object.
-    # build_ward adds the containers in layout.SHELF_ORDER order.
-    matches = [i for i, c in enumerate(layout.SHELF_ORDER) if c == colour]
-    shelf_index = matches[index]
-    obj = containers[shelf_index]
-    pick_point = layout.MEDICATION_SLOTS[colour][index]
+    # Perception: the camera model sits exactly where the camera prop is
+    pinhole = PinholeCamera(camera.T)
+    rgbd = SimulatedRGBD(pinhole, containers)
+    capture_dir = os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "captures")
+    os.makedirs(capture_dir, exist_ok=True)
 
     cell = KawasakiCell(env)
-    print(f"Picking {colour} container {index}")
     cell.pause(1.0)     # let Swift finish loading before moving
-    cell.pick_and_place(obj, pick_point, layout.TRANSFER_POINT,
-                        camera=camera, sensor=sensor)
+
+    # Orders from the command line, e.g.  bed_2=green bed_1=red
+    # or typed in one at a time if none are given.
+    queue = [parse_order(a) for a in sys.argv[1:]]
+    interactive = not queue
+    on_plate = None     # container currently sitting on the transfer plate
 
     try:
+        while True:
+            if interactive:
+                text = input("\nOrder (e.g. 'bed_2 green', q to quit): ")
+                if text.strip().lower() in ("q", "quit", "exit"):
+                    break
+                bed, colour = parse_order(text)
+            elif queue:
+                bed, colour = queue.pop(0)
+            else:
+                break
+
+            if colour is None:
+                print("  Didn't recognise a colour (red / green / blue).")
+                continue
+            bed_label = bed or "no bed given"
+            print(f"\nOrder: {colour} medication for {bed_label}")
+
+            # Plate must be clear before the next container goes on it.
+            # (Placeholder for the Doosan: it takes it to the bed table.)
+            if on_plate is not None:
+                obj, dest = on_plate
+                print(f"  Transfer plate cleared (Doosan placeholder -> {dest})")
+                if dest in layout.BEDS:
+                    obj.T = layout.BEDS[dest].A
+                else:
+                    obj.T = SE3(0, 0, -5).A
+                sensor.set_detected(False)
+                cell.pause(0.5)
+                on_plate = None
+
+            # 1. Look: capture an RGB-D frame and find the containers
+            rgb, depth = rgbd.capture()
+            found = detect_containers(rgb, depth, pinhole)
+            shelf = [d for d in found if d.position[1] < -0.55]
+            save_debug_image(os.path.join(capture_dir, "latest_detection.png"),
+                             rgb, depth, shelf)
+            print(f"  RGB-D camera sees {len(shelf)} container(s): "
+                  + ", ".join(d.colour for d in shelf))
+
+            # 2. Choose: first container of the requested colour
+            wanted = [d for d in shelf if d.colour == colour]
+            if not wanted:
+                print(f"  No {colour} container left on the shelf - "
+                      "order skipped, robot stays home.")
+                continue
+            det = wanted[0]
+            print(f"  Target: {det.colour} at {np.round(det.position, 3)}")
+            obj = find_object_at(containers, det.position)
+            if obj is None:
+                print("  Detection doesn't match anything graspable - skipped.")
+                continue
+
+            # 3. Act: pick at the DETECTED position, place on the plate
+            cell.pick_and_place(obj, SE3(det.position), layout.TRANSFER_POINT,
+                                camera=camera, sensor=sensor)
+            on_plate = (obj, bed)
+
+        print("\nAll orders done. Ctrl+C to close.")
         while True:
             env.step(0.05)
             time.sleep(0.05)
