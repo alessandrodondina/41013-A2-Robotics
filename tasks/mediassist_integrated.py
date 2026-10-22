@@ -17,8 +17,9 @@ from spatialmath.base import rpy2r
 from spatialgeometry import Mesh, Cuboid, Cylinder
 from environment.ward import build_ward
 import layout
-from tasks.kawasaki_pick_place import KawasakiCell
+from tasks.kawasaki_pick_place import KawasakiCell, find_object_at
 from environment.sensors import RGBDCamera, PhotoelectricSensor
+from perception.rgbd_detection import PinholeCamera, SimulatedRGBD, detect_containers, save_debug_image
 from robot_models.doosan_m0609 import create_doosan, JOINT_XYZ, JOINT_RPY
 from tasks.safety_control import SafetyControl, SimulationStopped
 from tasks.safety_equipment import SafetyEquipment
@@ -153,7 +154,9 @@ def plan_rail_safe_path(start,goal):
             return shortened
     raise RuntimeError('No collision-clear path found after planning; robot remains stopped.')
 
-def main():
+def main(colour='red', patient=2):
+    if colour not in layout.MEDICATION_SLOTS or patient not in TABLES:
+        raise ValueError('Invalid medication colour or destination bed')
     safety=SafetyControl()
     env=swift.Swift()
     env.launch(realtime=True)
@@ -396,9 +399,8 @@ def main():
             env.add(mesh)
             group.append(mesh)
         groups.append(group)
-    # Share the actual red shelf container with both robots.
-    red_shelf_index = layout.SHELF_ORDER.index("red")
-    bottle = containers[red_shelf_index]
+    # Bottle is selected from the live RGB-D detection before pickup.
+    bottle = None
     x=TRANSFER_X
     q=np.zeros(6)
     holding=False
@@ -436,19 +438,35 @@ def main():
                 redraw();env.step(.05);time.sleep(.05)
     try:
         redraw(); env.step(.1)
-        # Stage 1: Kawasaki moves the real red cylinder to the transfer plate.
-        print("\nSTAGE 1 — Kawasaki picking RED medication", flush=True)
+        # Stage 1: select the medication from RGB-D observations.
+        print("\nSTAGE 1 — Kawasaki picking %s medication for bed %d" % (colour.upper(), patient), flush=True)
         try:
             kawasaki = KawasakiCell(env)
             kawasaki.safety = safety
             camera = RGBDCamera(env)
             sensor = PhotoelectricSensor(env)
             kawasaki.pause(1.0)
-            kawasaki.pick_and_place(bottle, layout.MEDICATION_SLOTS["red"][0],
+            pinhole = PinholeCamera(camera.T)
+            rgbd = SimulatedRGBD(pinhole, containers)
+            rgb, depth = rgbd.capture()
+            detected = detect_containers(rgb, depth, pinhole)
+            shelf = [d for d in detected if d.position[1] < -0.55]
+            capture_path = Path(__file__).resolve().parent.parent / 'captures' / 'latest_detection.png'
+            capture_path.parent.mkdir(parents=True, exist_ok=True)
+            save_debug_image(str(capture_path), rgb, depth, shelf)
+            choices = [d for d in shelf if d.colour == colour]
+            if not choices:
+                raise RuntimeError('RGB-D camera did not detect %s medication on shelf' % colour)
+            detection = choices[0]
+            bottle = find_object_at(containers, detection.position)
+            if bottle is None:
+                raise RuntimeError('Detected medication does not match a graspable container')
+            print('[RGB-D] Detected %s medication at %s' % (colour, np.round(detection.position, 3)), flush=True)
+            kawasaki.pick_and_place(bottle, SE3(detection.position),
                                     layout.TRANSFER_POINT, camera=camera, sensor=sensor)
             # Keep Kawasaki in its home position as Doosan takes over.
             bottle.T = SE3(TRANSFER_X, TRANSFER_Y, TRANSFER_Z + BOTTLE_H / 2)
-            print("STAGE 2 — Doosan collecting RED medication", flush=True)
+            print("STAGE 2 — Doosan collecting %s medication for bed %d" % (colour.upper(), patient), flush=True)
         except SimulationStopped:
             print("[SAFETY] Kawasaki task cancelled; Doosan will not start.", flush=True)
             raise
@@ -457,7 +475,6 @@ def main():
             raise
         print('\nMediAssist — rail collision-aware path planning',flush=True)
         try:
-            patient=2
             tx,ty,tz=TABLES[patient]
             drop_x=float(np.clip(tx,.15,3.20))
             pickup_z=TRANSFER_Z+BOTTLE_H
@@ -562,7 +579,13 @@ if __name__ == '__main__':
         SafetyLauncher().run()
     else:
         try:
-            main()
+            import argparse
+            parser = argparse.ArgumentParser()
+            parser.add_argument('--worker', action='store_true')
+            parser.add_argument('--colour', choices=('red','green','blue'), default='red')
+            parser.add_argument('--bed', type=int, choices=(1,2,3), default=2)
+            args = parser.parse_args()
+            main(colour=args.colour, patient=args.bed)
         except SimulationStopped as exc:
             print('[SAFETY] Worker stopped:', exc, flush=True)
         except KeyboardInterrupt:
