@@ -23,13 +23,18 @@ class SafetyControl:
                 status = json.load(response)
         except Exception as exc:
             raise SimulationStopped('Safety controller unavailable: %s' % exc)
+        if hasattr(self, 'on_status'):
+            self.on_status(status['state'])
         if status['state'] != 'RUNNING':
             raise SimulationStopped('Simulation stop requested; task cancelled.')
 
     def status(self):
         try:
             with urlopen(self.url, timeout=0.5) as response:
-                return json.load(response)['state']
+                state = json.load(response)['state']
+                if hasattr(self, 'on_status'):
+                    self.on_status(state)
+                return state
         except Exception:
             return 'E-STOPPED'
 
@@ -43,7 +48,7 @@ class SafetyControl:
     def close(self):
         pass  # The persistent launcher owns the browser GUI.
 
-PAGE = '''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>MediAssist Safety</title><style>body{font-family:system-ui;background:#111827;color:#fff;max-width:540px;margin:45px auto;padding:22px}button{padding:18px;margin:7px;border:0;border-radius:10px;font-size:19px;font-weight:bold;cursor:pointer}button:disabled{opacity:.35;cursor:not-allowed}#stop{background:#e11d48;color:white;width:96%;font-size:26px}#reset{background:#f59e0b}#start{background:#10b981}#state{padding:20px;background:#374151;border-radius:10px;font-size:23px}small{color:#cbd5e1}</style></head><body><h1>MediAssist | Safety Controls</h1><div id="state">Connecting...</div><button id="stop" onclick="send('stop')">EMERGENCY STOP</button><button id="reset" onclick="send('reset')">RESET / ACKNOWLEDGE</button><button id="start" onclick="send('start')">START NEW DELIVERY</button><p><small>Simulation-only interlock, not a hardware E-stop. STOP cancels the current task. RESET never causes motion. START launches a fresh Swift simulation from its initial configuration, not from the interrupted pose.</small></p><script>async function send(x){try{await fetch('/'+x,{method:'POST'});await refresh()}catch(e){document.getElementById('state').textContent='Controller disconnected'}}async function refresh(){try{let r=await fetch('/status',{cache:'no-store'});let j=await r.json();document.getElementById('state').textContent='STATUS: '+j.state;document.getElementById('reset').disabled=j.state!=='E-STOPPED';document.getElementById('start').disabled=!['READY','RESET - WAITING FOR START','COMPLETE','FAULT'].includes(j.state);document.getElementById('stop').disabled=j.state==='E-STOPPED'}catch(e){document.getElementById('state').textContent='Controller disconnected'}}setInterval(refresh,300);refresh()</script></body></html>'''
+PAGE = '''<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"><title>MediAssist Safety</title><style>body{font-family:system-ui;background:#111827;color:#fff;max-width:540px;margin:45px auto;padding:22px}button{padding:18px;margin:7px;border:0;border-radius:10px;font-size:19px;font-weight:bold;cursor:pointer}button:disabled{opacity:.35;cursor:not-allowed}#stop{background:#e11d48;color:white;width:96%;font-size:26px}#reset{background:#f59e0b}#start{background:#10b981}#state{padding:20px;background:#374151;border-radius:10px;font-size:23px}small{color:#cbd5e1}</style></head><body><h1>MediAssist | Safety Controls</h1><div id="state">Connecting...</div><p style="font-size:14px;color:#cbd5e1">🟢 SAFE / IDLE &nbsp; 🟠 OPERATING &nbsp; 🔴 STOP / FAULT</p><button id="stop" onclick="send('stop')">EMERGENCY STOP</button><button id="reset" onclick="send('reset')">RESET / ACKNOWLEDGE</button><button id="start" onclick="send('start')">START NEW DELIVERY</button><p><small>Simulation-only interlock, not a hardware E-stop. STOP cancels the current task. RESET never causes motion. START launches a fresh Swift simulation from its initial configuration, not from the interrupted pose.</small></p><script>async function send(x){try{await fetch('/'+x,{method:'POST'});await refresh()}catch(e){document.getElementById('state').textContent='Controller disconnected'}}async function refresh(){try{let r=await fetch('/status',{cache:'no-store'});let j=await r.json();let mode=['E-STOPPED','FAULT'].includes(j.state)?'STOP / FAULT':j.state==='RUNNING'?'OPERATING':'SAFE / IDLE';let el=document.getElementById('state');el.textContent='● '+mode+' — '+j.state;el.style.color=mode==='STOP / FAULT'?'#fb7185':mode==='OPERATING'?'#fbbf24':'#4ade80';document.getElementById('reset').disabled=j.state!=='E-STOPPED';document.getElementById('start').disabled=!['READY','RESET - WAITING FOR START','COMPLETE','FAULT'].includes(j.state);document.getElementById('stop').disabled=j.state==='E-STOPPED'}catch(e){document.getElementById('state').textContent='Controller disconnected'}}setInterval(refresh,300);refresh()</script></body></html>'''
 
 class SafetyLauncher:
     def __init__(self, port=PORT):
