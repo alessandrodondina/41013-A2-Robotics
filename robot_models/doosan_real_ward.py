@@ -10,7 +10,7 @@ from spatialmath.base import rpy2r
 from spatialgeometry import Mesh, Cuboid
 
 from environment.ward import build_ward
-from robot_models.doosan_m0609 import create_doosan, JOINT_XYZ, JOINT_RPY
+from robot_models.doosan_m0609 import create_doosan, JOINT_XYZ, JOINT_RPY, swift_mesh_path
 
 env = swift.Swift()
 env.launch(realtime=True)
@@ -50,6 +50,7 @@ for group in MESH_FILES:
             filename=str(MESH_DIR / filename),
             scale=[0.001, 0.001, 0.001],
         )
+        mesh.filename = swift_mesh_path(mesh.filename)
         env.add(mesh)
         pieces.append(mesh)
     mesh_groups.append(pieces)

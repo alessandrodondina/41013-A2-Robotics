@@ -163,13 +163,15 @@ class KawasakiCell:
         if sensor is not None:
             sensor.set_detected(False)
 
-        print("  -> home")
-        self.move_joint(self.bot.qhome)
+        # Skip the move if already at home (saves ~2 s at the start)
+        if not np.allclose(self.bot.q, self.bot.qhome, atol=1e-3):
+            print("  -> home")
+            self.move_joint(self.bot.qhome)
 
         if camera is not None:
             print("  -> RGB-D camera identifying container")
             camera.identify(pick_point)
-            self.pause(1.5)
+            self.pause(0.8)
             camera.clear()
 
         print("  -> above container")

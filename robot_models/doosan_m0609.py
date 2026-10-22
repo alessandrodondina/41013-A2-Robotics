@@ -46,6 +46,18 @@ JOINT_LIMITS = np.array([
 ])
 
 
+def swift_mesh_path(path):
+    """Swift 1.1.0 on Windows can't serve 'C:/...' mesh paths (404 and the
+    page crashes); a drive-relative 'Users/...' path works. Unchanged on
+    macOS/Linux."""
+    import os
+    from pathlib import PureWindowsPath
+    if os.name != "nt":
+        return str(path)
+    p = PureWindowsPath(str(path))
+    return "/".join(p.parts[1:]) if p.drive else str(path).replace("\\", "/")
+
+
 def create_doosan():
     """Create the custom six-joint Doosan M0609 ETS model."""
 

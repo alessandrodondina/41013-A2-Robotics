@@ -11,7 +11,7 @@ from spatialmath import SE3
 from spatialmath.base import rpy2r
 from spatialgeometry import Mesh, Cuboid, Cylinder
 from environment.ward import build_ward
-from robot_models.doosan_m0609 import create_doosan, JOINT_XYZ, JOINT_RPY
+from robot_models.doosan_m0609 import create_doosan, JOINT_XYZ, JOINT_RPY, swift_mesh_path
 
 RAIL_Y, BASE_Z, CARRIAGE_Z = .75, .96, .90
 TRANSFER_X, TRANSFER_Y, TRANSFER_Z = 1.65, .12, .83
@@ -155,6 +155,7 @@ def main():
         group=[]
         for filename in filenames:
             mesh=Mesh(filename=str(MESH_DIR/filename),scale=[.001]*3)
+            mesh.filename=swift_mesh_path(mesh.filename)
             env.add(mesh)
             group.append(mesh)
         groups.append(group)

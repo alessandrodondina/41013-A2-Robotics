@@ -23,7 +23,7 @@ from perception.rgbd_detection import (PinholeCamera, SimulatedRGBD,
                                        detect_containers, save_debug_image)
 from tasks.kawasaki_pick_place import KawasakiCell, find_object_at
 from tasks.safety_equipment import SafetyEquipment
-from robot_models.doosan_m0609 import create_doosan, JOINT_XYZ, JOINT_RPY
+from robot_models.doosan_m0609 import create_doosan, JOINT_XYZ, JOINT_RPY, swift_mesh_path
 from robot_models.doosan_delivery_safe_v7 import (
     RAIL_Y, CARRIAGE_Z, TRANSFER_X, TRANSFER_Y, TRANSFER_Z, TABLES,
     BOTTLE_H, MESH_DIR, MESH_FILES, base_pose, arm_points, solve_ik,
@@ -84,6 +84,7 @@ class DoosanCell:
                 for filename in filenames:
                     m = Mesh(filename=str(MESH_DIR / filename),
                              scale=[.001] * 3)
+                    m.filename = swift_mesh_path(m.filename)
                     env.add(m)
                     group.append(m)
                 self.groups.append(group)

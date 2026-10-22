@@ -20,7 +20,7 @@ import layout
 from tasks.kawasaki_pick_place import KawasakiCell, find_object_at
 from environment.sensors import RGBDCamera, PhotoelectricSensor
 from perception.rgbd_detection import PinholeCamera, SimulatedRGBD, detect_containers, save_debug_image
-from robot_models.doosan_m0609 import create_doosan, JOINT_XYZ, JOINT_RPY
+from robot_models.doosan_m0609 import create_doosan, JOINT_XYZ, JOINT_RPY, swift_mesh_path
 from tasks.safety_control import SafetyControl, SimulationStopped
 from tasks.safety_equipment import SafetyEquipment
 
@@ -46,10 +46,18 @@ def arm_points(x, joints):
         points.append(np.asarray(T.t))
     return points
 
+# Light-curtain posts on the transfer side (x, y), from 0.78 m to 1.68 m
+# high. Half-width = 27.5 mm post + ~90 mm for the arm/bottle thickness.
+CURTAIN_POSTS = ((0.94, 0.39), (2.36, 0.39))
+POST_HALF = 0.12
+POST_Z = (0.70, 1.72)
+
 def rail_clearance(x, joints):
     """Conservative approximate link-segment vs rail-body test.
     Rail body occupies x=-.05..3.45, y=.61..89, z=.65..83.
     Added 35mm clearance. Ignore anchored base-to-shoulder segment.
+    Also keeps the arm, tool and a held bottle clear of the light-curtain
+    posts beside the transfer plate.
     """
     points=arm_points(x,joints)
     low=np.array([-.085,.575,.615])
@@ -60,6 +68,15 @@ def rail_clearance(x, joints):
             p=a+(b-a)*t
             if np.all(p>=low) and np.all(p<=high):
                 return False, f'arm link {link} enters rail clearance zone at {np.round(p,3)}'
+    segments=[(points[i-1],points[i]) for i in range(2,7)]
+    segments.append((points[6],points[6]+np.array([0,0,-.17])))   # tool + bottle
+    for a,b in segments:
+        for t in np.linspace(0,1,13):
+            p=a+(b-a)*t
+            if POST_Z[0]<=p[2]<=POST_Z[1]:
+                for px,py in CURTAIN_POSTS:
+                    if abs(p[0]-px)<=POST_HALF and abs(p[1]-py)<=POST_HALF:
+                        return False, f'arm would hit light-curtain post at ({px}, {py})'
     return True,''
 
 def solve_ik(robot,x,target,seed):
@@ -154,7 +171,53 @@ def plan_rail_safe_path(start,goal):
             return shortened
     raise RuntimeError('No collision-clear path found after planning; robot remains stopped.')
 
-def main(colour='red', patient=2):
+def jog_tick(jog, base_url, allowed):
+    """Fetch jog commands from the control page, run one jog frame and
+    publish the jog state back for the page to show."""
+    import json
+    from urllib.request import Request, urlopen
+    try:
+        with urlopen(base_url + '/jog_cmds', timeout=0.5) as r:
+            commands = json.load(r)
+    except Exception:
+        commands = []
+    for c in commands:
+        if not allowed:
+            jog.cancel()
+            jog.fault = 'not available now - finish or reset the delivery first'
+            continue
+        t = c.get('type')
+        if t == 'robot':
+            jog.set_robot(c.get('idx', 0))
+        elif t == 'step':
+            jog.set_step(c.get('idx', 1))
+        elif t == 'joint':
+            jog.set_joint(int(c['j']), float(c['value']))
+        elif t == 'rail':
+            jog.set_rail(float(c['value']))
+        elif t == 'cart':
+            jog.cart_jog(int(c['axis']), int(c['sign']))
+        elif t == 'home':
+            jog.home()
+    if allowed:
+        jog.frame()
+    elif jog.busy():
+        jog.cancel()
+        jog.fault = 'jog cancelled by safety stop'
+    snap = jog.snapshot()
+    snap['allowed'] = allowed
+    try:
+        urlopen(Request(base_url + '/jog_state', data=json.dumps(snap).encode(),
+                        method='POST'), timeout=0.5).close()
+    except Exception:
+        pass
+
+
+class TeachOnly(Exception):
+    """Teach session: build the scene, skip the delivery."""
+
+
+def main(colour='red', patient=2, teach=False):
     if colour not in layout.MEDICATION_SLOTS or patient not in TABLES:
         raise ValueError('Invalid medication colour or destination bed')
     safety=SafetyControl()
@@ -396,6 +459,7 @@ def main(colour='red', patient=2):
         group=[]
         for filename in filenames:
             mesh=Mesh(filename=str(MESH_DIR/filename),scale=[.001]*3)
+            mesh.filename=swift_mesh_path(mesh.filename)
             env.add(mesh)
             group.append(mesh)
         groups.append(group)
@@ -436,6 +500,7 @@ def main(colour='red', patient=2):
                 state=a+(b-a)*s
                 x=float(state[0]);q=state[1:].copy()
                 redraw();env.step(.05);time.sleep(.05)
+    kawasaki = None
     try:
         redraw(); env.step(.1)
         # Stage 1: select the medication from RGB-D observations.
@@ -445,7 +510,9 @@ def main(colour='red', patient=2):
             kawasaki.safety = safety
             camera = RGBDCamera(env)
             sensor = PhotoelectricSensor(env)
-            kawasaki.pause(1.0)
+            if teach:
+                raise TeachOnly()
+            kawasaki.pause(0.3)
             pinhole = PinholeCamera(camera.T)
             rgbd = SimulatedRGBD(pinhole, containers)
             rgb, depth = rgbd.capture()
@@ -467,8 +534,9 @@ def main(colour='red', patient=2):
             # Keep Kawasaki in its home position as Doosan takes over.
             bottle.T = SE3(TRANSFER_X, TRANSFER_Y, TRANSFER_Z + BOTTLE_H / 2)
             print("STAGE 2 — Doosan collecting %s medication for bed %d" % (colour.upper(), patient), flush=True)
-        except SimulationStopped:
-            print("[SAFETY] Kawasaki task cancelled; Doosan will not start.", flush=True)
+        except (SimulationStopped, TeachOnly):
+            if not teach:
+                print("[SAFETY] Kawasaki task cancelled; Doosan will not start.", flush=True)
             raise
         except Exception as exc:
             print("Kawasaki failed; Doosan will NOT start a fake handoff:", repr(exc), flush=True)
@@ -550,6 +618,8 @@ def main(colour='red', patient=2):
             raise
         print('Delivery complete. Awaiting next operator command.', flush=True)
 
+    except TeachOnly:
+        print('[TEACH] Scene ready for jogging.', flush=True)
     except SimulationStopped:
         print('[SAFETY] Motion cancelled. Swift remains OPEN and stationary.', flush=True)
     except Exception as exc:
@@ -560,12 +630,53 @@ def main(colour='red', patient=2):
     # No further robot trajectory commands. Preserve the scene during STOP and RESET.
     # Only a separate START requests worker shutdown and a fresh initial scene.
     print('[SAFETY] Holding current robot poses until START NEW DELIVERY.', flush=True)
+
+    # Teach / jog: allowed once the delivery is COMPLETE or in a TEACH
+    # session, never while stopped. One jog frame per loop - nothing blocks.
+    jog = None
+    if kawasaki is not None:
+        from tasks.jog_panel import JogController
+
+        class DoosanHandle:
+            """Gives the jog controller access to this worker's Doosan."""
+            def __init__(self):
+                self.robot = robot
+            @property
+            def x(self):
+                return x
+            @x.setter
+            def x(self, value):
+                set_doosan(value, q)
+            @property
+            def q(self):
+                return q
+            @q.setter
+            def q(self, value):
+                set_doosan(x, value)
+            def redraw(self):
+                redraw()
+            def park_q(self):
+                if not hasattr(self, '_park'):
+                    self._park = solve_ik(robot, TRANSFER_X,
+                                          SE3(TRANSFER_X, 0.45, 1.25), np.zeros(6))
+                return self._park.copy()
+
+        def set_doosan(new_x, new_q):
+            nonlocal x, q
+            x = float(new_x)
+            q = np.asarray(new_q, dtype=float)
+
+        jog = JogController(kawasaki, DoosanHandle())
+        jog.set_mode(True)
+    jog_url = safety.url.replace('/status', '')
     try:
         while True:
             state = safety.status()
             if state == 'RESTARTING':
                 print('[SAFETY] New task authorised. Closing previous scene.', flush=True)
                 break
+            if jog is not None:
+                jog_tick(jog, jog_url, state in ('COMPLETE', 'TEACH'))
             env.step(.05)
             time.sleep(.05)
     finally:
@@ -584,8 +695,9 @@ if __name__ == '__main__':
             parser.add_argument('--worker', action='store_true')
             parser.add_argument('--colour', choices=('red','green','blue'), default='red')
             parser.add_argument('--bed', type=int, choices=(1,2,3), default=2)
+            parser.add_argument('--teach', action='store_true')
             args = parser.parse_args()
-            main(colour=args.colour, patient=args.bed)
+            main(colour=args.colour, patient=args.bed, teach=args.teach)
         except SimulationStopped as exc:
             print('[SAFETY] Worker stopped:', exc, flush=True)
         except KeyboardInterrupt:
