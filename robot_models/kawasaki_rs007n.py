@@ -3,6 +3,8 @@ kawasaki_rs007n.py
 ==================
 """
 
+import os
+
 import numpy as np
 from spatialmath import SE3
 from roboticstoolbox import DHRobot, RevoluteDH
@@ -189,10 +191,68 @@ class KawasakiRS007N(DHRobot):
         R = np.column_stack((x, y, z))
         return SE3.Rt(R, (np.asarray(p0) + np.asarray(p1)) / 2.0), L
 
+    # ------------------------------------------------------------------
+    # Official Kawasaki CAD meshes (khi_robot ROS package, khi_rs_description)
+    # ------------------------------------------------------------------
+    MESH_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "meshes", "rs007n")
+    MESH_COLOURS = [(0.30, 0.32, 0.35, 1.0)] + \
+        [(0.95, 0.95, 0.93, 1.0)] * 5 + [(0.30, 0.32, 0.35, 1.0)]
+
+    # The meshes are drawn in Kawasaki's URDF link frames. Kawasaki's URDF
+    # and this DH model describe the same arm with two conventions: its
+    # base is turned -90 deg about z relative to ours, and joints 1, 3 and
+    # 5 rotate the opposite way. (Checked numerically: every joint origin
+    # and the full flange orientation match for random q.)
+    URDF_BASE = SE3.Rz(-np.pi / 2)
+    URDF_SIGNS = np.array([-1, 1, -1, 1, -1, 1])
+
+    @staticmethod
+    def _urdf_link_frames(q):
+        """Kawasaki's URDF joint chain (rs007n_macro.xacro), link 0..6."""
+        r90 = np.pi / 2
+        F = [SE3()]
+        T = SE3.Tz(0.36) * SE3.Rz(-q[0]); F.append(T)
+        T = T * SE3.Ry(-r90) * SE3.Rz(q[1]); F.append(T)
+        T = T * SE3.Tx(0.355) * SE3.Rz(-q[2]); F.append(T)
+        T = T * SE3.Tx(0.0925) * SE3.Ry(r90) * SE3.Rz(q[3]); F.append(T)
+        T = T * SE3.Tz(0.2825) * SE3.Ry(-r90) * SE3.Rz(-q[4]); F.append(T)
+        T = T * SE3.Tx(0.078) * SE3.Ry(r90) * SE3.Rz(q[5]); F.append(T)
+        return F
+
+    # Visual origin of each mesh inside its link frame (from the xacro)
+    _MESH_OFFSET = [SE3(), SE3(), SE3.Ry(np.pi / 2), SE3.Ry(np.pi / 2),
+                    SE3.Tz(0.2825), SE3.Ry(np.pi / 2), SE3()]
+
+    def _mesh_poses(self, q):
+        W = SE3(self.base) * self.URDF_BASE
+        F = self._urdf_link_frames(self.URDF_SIGNS * np.asarray(q))
+        return [W * f * v for f, v in zip(F, self._MESH_OFFSET)]
+
     def add_to_env(self, env):
         if sg is None:
             raise ImportError("spatialgeometry is required for graphics")
         self._gfx_env = env
+        self._gfx_meshes = []
+        if os.path.isdir(self.MESH_DIR):
+            try:
+                from robot_models.doosan_m0609 import swift_mesh_path
+            except ImportError:
+                swift_mesh_path = str
+            for i in range(7):
+                m = sg.Mesh(filename=os.path.join(self.MESH_DIR,
+                                                  f"RS007N_J{i}.stl"),
+                            color=self.MESH_COLOURS[i])
+                m.filename = swift_mesh_path(m.filename)
+                env.add(m)
+                self._gfx_meshes.append(m)
+            self._gfx_shapes = [("mesh", None, None)]   # marks graphics on
+            self.update()
+            return self
+        print("[KAWASAKI] Mesh folder not found - using simple cylinders.")
+        return self._add_cylinders(env)
+
+    def _add_cylinders(self, env):
         frames = self.link_frames()
         white = (0.93, 0.93, 0.91, 1.0)
         grey = (0.35, 0.37, 0.40, 1.0)
@@ -229,6 +289,10 @@ class KawasakiRS007N(DHRobot):
         """Re-pose every shape from the current joint angles."""
         if q is not None:
             self.q = np.asarray(q, dtype=float)
+        if getattr(self, "_gfx_meshes", None):
+            for m, T in zip(self._gfx_meshes, self._mesh_poses(self.q)):
+                m.T = T.A
+            return
         if not self._gfx_shapes:
             return
         frames = self.link_frames()
